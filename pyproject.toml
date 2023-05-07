@@ -7,11 +7,11 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 langchain = "^0.0.160"
-python = "^3.10"
-requests = "^2.30.0"
 openai = "^0.27.6"
+python = "^3.10"
+python-dotenv = "^1.0.0"
+requests = "^2.30.0"
 tiktoken = "^0.3.3"
-pandas = "^2.0.1"
 
 [tool.poetry.group.dev.dependencies]
 black = "^23.3.0"

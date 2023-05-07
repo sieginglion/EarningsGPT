@@ -1,14 +1,21 @@
 import logging
+import re
+from os import environ
 from pathlib import Path
+from typing import Any
 
 import requests as r
+from dotenv import load_dotenv
 from langchain.chat_models import ChatOpenAI
 from langchain.schema import HumanMessage, SystemMessage
 from langchain.text_splitter import TokenTextSplitter
 
-FMP_KEY = ''
-OPENAI_KEY = ''
-TOP_K_COMPANIES = 10
+load_dotenv()
+logging.basicConfig(level=logging.INFO)
+
+FMP_KEY = environ['FMP_KEY']
+OPENAI_KEY = environ['OPENAI_KEY']
+TOP_K_COMPANIES = 2
 
 
 def get_symbols() -> list[str]:
@@ -42,34 +49,22 @@ def get_transcript(symbol: str) -> str:
     return data[0]['content']
 
 
-def get_transcripts(symbols: list[str]) -> dict[str, str]:
-    symbol_to_transcript = {}
-    for symbol in symbols:
-        try:
-            symbol_to_transcript[symbol] = get_transcript(symbol)
-        except r.HTTPError:
-            logging.error(f'{symbol} not found')
-        if len(symbol_to_transcript) == TOP_K_COMPANIES:
-            break
-    return symbol_to_transcript
-
-
 def summarize_article(article: str) -> str:
     splitter = TokenTextSplitter(
-        chunk_overlap=102,
-        chunk_size=2048,
+        chunk_overlap=137,
+        chunk_size=2731,
         model_name='gpt-3.5-turbo',
     )
-    paragraphs = splitter.split_text(article)
-    jobs = [
+    chunks = splitter.split_text(article)
+    threads = [
         [
             SystemMessage(
-                content='You are a summarizer. You summarize an article thoroughly. Here is the article:'
+                content='You are a financial analyst. Generate a comprehensive summary for the following article:'
             ),
-            HumanMessage(content=paragraph),
-            HumanMessage(content='Thorough Summary:'),
+            HumanMessage(content=chunk),
+            HumanMessage(content='The comprehensive summary:'),
         ]
-        for paragraph in paragraphs
+        for chunk in chunks
     ]
     llm = ChatOpenAI(
         max_retries=2,
@@ -77,19 +72,13 @@ def summarize_article(article: str) -> str:
         openai_api_key=OPENAI_KEY,
         temperature=0.5,
     )  # type: ignore
-    results = llm.generate(jobs).generations
+    results = llm.generate(threads).generations
     summary = '\n'.join(e[0].text for e in results)
-    if len(results) > 1:
-        return summarize_article(summary)
-    return summary
+    return summarize_article(summary) if len(results) > 1 else summary
 
 
 def get_summary(symbol: str) -> str:
-    transcript = get_transcript(symbol)
-    return summarize_article(transcript)
-
-
-# get_summary('MSFT')
+    return summarize_article(get_transcript(symbol))
 
 
 def load_summary(symbol: str) -> str:
@@ -99,16 +88,71 @@ def load_summary(symbol: str) -> str:
     return path.read_text()
 
 
-def load_summaries() -> dict[str, str]:
-    symbols = get_symbols()
-    symbol_to_summary = {}
-    for symbol in symbols:
+def get_summaries() -> list[str]:
+    summaries = []
+    for symbol in get_symbols():
         try:
-            symbol_to_summary[symbol] = load_summary(symbol)
+            summary = re.sub(r'\n+', ' ', load_summary(symbol).strip())
+            summaries.append(f'{symbol}:\n{summary}\n\n')
+            if len(summaries) == TOP_K_COMPANIES:
+                break
         except r.HTTPError:
             logging.error(f'{symbol} not found')
-        if len(symbol_to_summary) == TOP_K_COMPANIES:
-            break
-    return symbol_to_summary
+    return summaries
 
-load_summary('MSFT')
+
+class AtomicTextsSplitter(TokenTextSplitter):
+    def __init__(self, max_chunk_size, model_name) -> None:
+        super().__init__(
+            chunk_overlap=0, chunk_size=max_chunk_size, model_name=model_name
+        )
+
+    def split_texts(self, texts: list[str]) -> list[str]:
+        chunk = ''
+        chunk_size = 0
+        chunks = []
+        for text in texts:
+            text_size = len(self._tokenizer.encode(text))
+            if chunk_size + text_size <= self._chunk_size:
+                chunk += text
+                chunk_size += text_size
+            else:
+                chunks.append(chunk)
+                chunk = [text]
+                chunk_size = text_size
+        if chunk:
+            chunks.append(chunk)
+        return chunks
+
+
+def extract_most_related_content(articles: list[str], query: str) -> str:
+    splitter = AtomicTextsSplitter(max_chunk_size=2731, model_name='gpt-3.5-turbo')
+    chunks = splitter.split_texts(articles)
+    threads = [
+        [
+            SystemMessage(
+                content='You are a financial analyst. Extract the content related to the question from the article.'
+            ),
+            HumanMessage(content=f'Article: {chunk}'),
+            HumanMessage(content=f'Question: {query}'),
+            HumanMessage(content='Content related to the question:'),
+        ]
+        for chunk in chunks
+    ]
+    llm = ChatOpenAI(
+        max_retries=2,
+        model_name='gpt-3.5-turbo',
+        openai_api_key=OPENAI_KEY,
+        temperature=0.5,
+    )  # type: ignore
+    results = llm.generate(threads).generations
+    contents = [e[0].text for e in results]
+    return (
+        extract_most_related_content(contents, query)
+        if len(contents) > 1
+        else contents[0]
+    )
+
+
+summaries = get_summaries()
+extract_most_related_content(summaries, 'What are the companies focusing on?')
